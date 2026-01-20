@@ -16,9 +16,18 @@ export interface TestPlanData {
   content?: string;
 }
 
+export interface HistoryItem {
+  id: string;
+  metadata: ProjectMetadata;
+  result: string;
+  updatedAt: string;
+  sourceType: InputSource;
+}
+
 export enum AppState {
   METADATA = 'METADATA',
   SOURCE = 'SOURCE',
   ANALYZING = 'ANALYZING',
-  RESULT = 'RESULT'
+  RESULT = 'RESULT',
+  HISTORY = 'HISTORY'
 }

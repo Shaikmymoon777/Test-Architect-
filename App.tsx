@@ -1,14 +1,21 @@
 
 import React, { useState, useEffect } from 'react';
-import { ProjectMetadata, AppState, InputSource, TestPlanData } from './types';
+import { ProjectMetadata, AppState, InputSource, TestPlanData, HistoryItem } from './types';
 import Header from './components/Header';
 import MetadataForm from './components/MetadataForm';
 import SourceSelector from './components/SourceSelector';
 import ResultView from './components/ResultView';
+import HistorySidebar from './components/HistorySidebar';
 import { generateTestPlan } from './services/geminiService';
+
+const HISTORY_KEY = 'ai_test_plan_history_vault';
 
 const App: React.FC = () => {
   const [step, setStep] = useState<AppState>(AppState.METADATA);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  
   const [metadata, setMetadata] = useState<ProjectMetadata>({
     projectName: '',
     version: '1.0.0',
@@ -21,6 +28,23 @@ const App: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [loadingPhase, setLoadingPhase] = useState(0);
   const [error, setError] = useState<string | null>(null);
+
+  // Load History from "Backend" (LocalStorage)
+  useEffect(() => {
+    const savedHistory = localStorage.getItem(HISTORY_KEY);
+    if (savedHistory) {
+      try {
+        setHistory(JSON.parse(savedHistory));
+      } catch (e) {
+        console.error("Failed to load history", e);
+      }
+    }
+  }, []);
+
+  // Persistent Auto-Save for History
+  useEffect(() => {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+  }, [history]);
 
   const phases = [
     "Analyzing project entry points...",
@@ -50,56 +74,114 @@ const App: React.FC = () => {
     setStep(AppState.ANALYZING);
     setLoading(true);
     setError(null);
-    setLoadingPhase(0);
 
     try {
-      const payload: TestPlanData = {
-        metadata,
-        sourceType: type,
-        sourceValue: value
-      };
+      const response = await generateTestPlan({ metadata, sourceType: type, sourceValue: value });
+      const newResult = response.text;
+      const newId = Date.now().toString();
       
-      const response = await generateTestPlan(payload);
-      setResult(response.text);
+      const newHistoryItem: HistoryItem = {
+        id: newId,
+        metadata,
+        result: newResult,
+        updatedAt: new Date().toISOString(),
+        sourceType: type
+      };
+
+      setHistory(prev => [newHistoryItem, ...prev]);
+      setActiveId(newId);
+      setResult(newResult);
       setStep(AppState.RESULT);
     } catch (err: any) {
-      setError(err.message || 'An unexpected error occurred during analysis.');
+      setError(err.message || 'An unexpected error occurred.');
       setStep(AppState.SOURCE);
     } finally {
       setLoading(false);
     }
   };
 
-  const reset = () => {
+  const handleManualUpdate = (newContent: string) => {
+    setResult(newContent);
+    if (activeId) {
+      setHistory(prev => prev.map(item => 
+        item.id === activeId 
+          ? { ...item, result: newContent, updatedAt: new Date().toISOString() } 
+          : item
+      ));
+    }
+  };
+
+  const handleSelectHistory = (item: HistoryItem) => {
+    setMetadata(item.metadata);
+    setResult(item.result);
+    setSourceType(item.sourceType);
+    setActiveId(item.id);
+    setStep(AppState.RESULT);
+    setIsHistoryOpen(false);
+  };
+
+  const handleDeleteHistory = (id: string) => {
+    if (window.confirm("Remove this document from history?")) {
+      setHistory(prev => prev.filter(item => item.id !== id));
+      if (activeId === id) {
+        reset(false);
+      }
+    }
+  };
+
+  const handleClearAllHistory = () => {
+    if (window.confirm("ARE YOU SURE? This will permanently delete ALL saved documents.")) {
+      setHistory([]);
+      localStorage.removeItem(HISTORY_KEY);
+      reset(false);
+    }
+  };
+
+  const reset = (ask = true) => {
+    if (ask && !window.confirm("Start a new test plan session? Current work remains in history.")) return;
     setStep(AppState.METADATA);
     setResult('');
     setError(null);
+    setActiveId(null);
+    setMetadata({
+      projectName: '',
+      version: '1.0.0',
+      date: new Date().toISOString().split('T')[0],
+      preparedBy: '',
+      approvedBy: ''
+    });
   };
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50">
-      <Header />
+      <Header 
+        onToggleHistory={() => setIsHistoryOpen(true)} 
+        hasHistory={history.length > 0} 
+      />
       
+      <HistorySidebar 
+        isOpen={isHistoryOpen}
+        onClose={() => setIsHistoryOpen(false)}
+        items={history}
+        onSelect={handleSelectHistory}
+        onDelete={handleDeleteHistory}
+        onClearAll={handleClearAllHistory}
+      />
+
       <main className="flex-grow container mx-auto px-4 py-8 max-w-5xl">
         {step === AppState.METADATA && (
-          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-8 max-w-3xl mx-auto transform transition-all duration-500">
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-8 max-w-3xl mx-auto animate-in slide-in-from-bottom-4">
             <div className="flex items-center gap-3 mb-6">
               <div className="w-10 h-10 bg-blue-600 text-white rounded-xl flex items-center justify-center font-bold shadow-lg shadow-blue-200">1</div>
               <h2 className="text-2xl font-bold text-slate-800">Project Identification</h2>
             </div>
-            <MetadataForm 
-              initialData={metadata} 
-              onSubmit={handleMetadataSubmit} 
-            />
+            <MetadataForm initialData={metadata} onSubmit={handleMetadataSubmit} />
           </div>
         )}
 
         {step === AppState.SOURCE && (
-          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-8 max-w-3xl mx-auto transform transition-all duration-500">
-            <button 
-              onClick={() => setStep(AppState.METADATA)}
-              className="mb-6 text-slate-500 hover:text-blue-600 text-sm font-medium flex items-center gap-1 transition-colors"
-            >
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 p-8 max-w-3xl mx-auto animate-in fade-in">
+            <button onClick={() => setStep(AppState.METADATA)} className="mb-6 text-slate-500 hover:text-blue-600 text-sm font-medium flex items-center gap-1 transition-colors">
               <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
               </svg>
@@ -114,22 +196,16 @@ const App: React.FC = () => {
         )}
 
         {step === AppState.ANALYZING && (
-          <div className="flex flex-col items-center justify-center py-32 text-center animate-in fade-in zoom-in duration-500">
+          <div className="flex flex-col items-center justify-center py-32 text-center">
             <div className="relative mb-12">
               <div className="w-24 h-24 border-4 border-blue-100 rounded-full"></div>
               <div className="absolute inset-0 w-24 h-24 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-              <div className="absolute inset-4 bg-blue-50 rounded-full animate-pulse flex items-center justify-center">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-                </svg>
-              </div>
             </div>
             <h2 className="text-3xl font-black text-slate-900 mb-4 tracking-tight">Architecting Test Plan</h2>
             <div className="bg-white px-8 py-3 rounded-full shadow-sm border border-slate-200 flex items-center gap-3">
               <span className="flex h-2 w-2 rounded-full bg-blue-600 animate-ping"></span>
               <p className="text-blue-700 font-bold uppercase tracking-widest text-xs">{phases[loadingPhase]}</p>
             </div>
-            <p className="mt-6 text-slate-500 max-w-md mx-auto leading-relaxed">Gemini is deep-scanning your source to build a professional IEEE 829 compliant document. This may take up to 30 seconds.</p>
           </div>
         )}
 
@@ -137,43 +213,28 @@ const App: React.FC = () => {
           <ResultView 
             content={result} 
             metadata={metadata} 
-            onReset={reset} 
+            onReset={() => reset(true)}
+            onUpdate={handleManualUpdate}
           />
         )}
 
         {error && (
-          <div className="mt-8 p-6 bg-red-50 border-2 border-red-100 text-red-700 rounded-2xl flex items-start gap-4 animate-in slide-in-from-top-4 duration-300">
-            <div className="w-10 h-10 bg-red-100 text-red-600 rounded-lg flex items-center justify-center shrink-0">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-              </svg>
-            </div>
-            <div>
-              <p className="font-bold text-lg mb-1">Analysis Error</p>
-              <p className="text-sm opacity-90">{error}</p>
-              <button 
-                onClick={reset}
-                className="mt-4 px-4 py-2 bg-red-600 text-white text-xs font-bold rounded-lg hover:bg-red-700 transition uppercase tracking-wider"
-              >
-                Restart Process
-              </button>
-            </div>
+          <div className="mt-8 p-6 bg-red-50 border-2 border-red-100 text-red-700 rounded-2xl animate-in slide-in-from-top-4">
+            <p className="font-bold text-lg mb-1">Analysis Error</p>
+            <p className="text-sm opacity-90">{error}</p>
+            <button onClick={() => reset(false)} className="mt-4 px-4 py-2 bg-red-600 text-white text-xs font-bold rounded-lg hover:bg-red-700 transition uppercase tracking-wider">Restart</button>
           </div>
         )}
       </main>
 
-      <footer className="bg-white border-t border-slate-200 py-10 mt-auto">
+      <footer className="bg-white border-t border-slate-200 py-10 mt-auto no-print">
         <div className="container mx-auto px-4 text-center">
           <p className="text-slate-900 font-bold tracking-tight mb-2">AI Test Architect</p>
-          <p className="text-slate-400 text-sm mb-6 max-w-md mx-auto">Bridging the gap between React code and professional quality assurance standards using advanced generative AI.</p>
           <div className="flex justify-center gap-6 mb-8">
             <span className="px-3 py-1 bg-slate-100 text-slate-500 rounded-lg text-[10px] font-bold uppercase tracking-widest">IEEE 829</span>
             <span className="px-3 py-1 bg-slate-100 text-slate-500 rounded-lg text-[10px] font-bold uppercase tracking-widest">ISTQB Aligned</span>
-            <span className="px-3 py-1 bg-slate-100 text-slate-500 rounded-lg text-[10px] font-bold uppercase tracking-widest">Enterprise QA</span>
           </div>
-          <p className="text-slate-300 text-xs">
-            &copy; {new Date().getFullYear()} AI Test Plan Architect. Powered by Gemini.
-          </p>
+          <p className="text-slate-300 text-xs">&copy; {new Date().getFullYear()} AI Test Plan Architect. Vault Storage Active.</p>
         </div>
       </footer>
     </div>
